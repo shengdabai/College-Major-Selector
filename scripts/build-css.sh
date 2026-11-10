@@ -8,4 +8,4 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export BROWSERSLIST="${BROWSERSLIST:-defaults, Safari >= 12, iOS >= 12}"
-${TAILWIND_CLI:-npx --yes tailwindcss@3.4.19} -c tailwind.config.cjs -i src/tailwind.input.css -o tailwind.css --minify
+${TAILWIND_CLI:-npx --yes --registry=https://registry.npmjs.org tailwindcss@3.4.19} -c tailwind.config.cjs -i src/tailwind.input.css -o tailwind.css --minify

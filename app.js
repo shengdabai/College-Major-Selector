@@ -1937,10 +1937,18 @@ function initModeD() {
   }
 
   saveBtn.onclick = () => {
+    if (state_D.loading) return;
+    let base;
+    try {
+      base = advisorBase($('#D-api-base').value.trim() || 'https://api.openai.com/v1');
+    } catch (e) {
+      showDStatus(e.message, 'err');
+      return;
+    }
     const keyInput = $('#D-api-key').value.trim();
     // 如果用户输入的是掩码，保留旧值
     if (keyInput && keyInput !== '••••••••') state_D.apiKey = keyInput;
-    state_D.apiBase = $('#D-api-base').value.trim() || 'https://api.openai.com/v1';
+    state_D.apiBase = base;
     state_D.model = $('#D-model').value.trim() || 'gpt-4o';
     let persisted = false;
     try {
@@ -1958,6 +1966,7 @@ function initModeD() {
   };
 
   clearBtn.onclick = () => {
+    if (state_D.loading) return;
     state_D.messages = [];
     $('#D-chat-messages').innerHTML = '';
     if (state_D.apiKey) sendAdvisorOpening();
@@ -1981,7 +1990,8 @@ function showDStatus(msg, type) {
 }
 
 async function sendAdvisorOpening() {
-  if (!state_D.apiKey) return;
+  if (!state_D.apiKey || state_D.loading) return;
+  setAdvisorLoading(true);
   state_D.messages = [];
   appendDMessage('assistant', '正在连接...', true);
   try {
@@ -1992,7 +2002,17 @@ async function sendAdvisorOpening() {
   } catch(e) {
     removeLoadingBubble();
     appendDMessage('assistant', `⚠ 连接失败：${e.message}。请检查 API Key 和 Base URL 配置。`);
+  } finally {
+    setAdvisorLoading(false);
   }
+}
+
+function setAdvisorLoading(loading) {
+  state_D.loading = loading;
+  ['#D-send-btn', '#D-save-config', '#D-clear-chat'].forEach(sel => {
+    const el = $(sel);
+    if (el) el.disabled = loading;
+  });
 }
 
 async function sendUserMessage() {
@@ -2009,8 +2029,7 @@ async function sendUserMessage() {
   state_D.messages.push({ role: 'user', content: text });
   appendDMessage('user', text);
 
-  state_D.loading = true;
-  $('#D-send-btn').disabled = true;
+  setAdvisorLoading(true);
   appendDMessage('assistant', '...', true);
 
   try {
@@ -2023,35 +2042,63 @@ async function sendUserMessage() {
     appendDMessage('assistant', `⚠ 请求失败：${e.message}`);
     state_D.messages.pop();
   } finally {
-    state_D.loading = false;
-    $('#D-send-btn').disabled = false;
+    setAdvisorLoading(false);
   }
 }
 
-async function callAdvisorAPI(messages) {
-  const base = state_D.apiBase.replace(/\/$/, '');
-  const res = await fetch(`${base}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${state_D.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: state_D.model,
-      messages: [
-        { role: 'system', content: ADVISOR_SYSTEM_PROMPT },
-        ...messages,
-      ],
-      temperature: 0.7,
-      max_tokens: 2000,
-    }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err?.error?.message || `HTTP ${res.status}`);
+// API Key 只发往明确的加密地址；本机开发服务允许 HTTP。
+function advisorBase(base) {
+  let url;
+  try { url = new URL(base); } catch (e) {
+    throw new Error('API Base URL 必须是有效的 HTTPS 地址（本机服务可用 HTTP）');
   }
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content || '（无回复）';
+  const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  if ((url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) ||
+      url.username || url.password || url.href.includes('?') || url.href.includes('#')) {
+    throw new Error('API Base URL 必须使用 HTTPS（本机服务可用 HTTP），且不能含账号、密码、查询参数或片段');
+  }
+  return url.href.replace(/\/+$/, '');
+}
+
+async function callAdvisorAPI(messages) {
+  const base = advisorBase(state_D.apiBase);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60000);
+  try {
+    const res = await fetch(`${base}/chat/completions`, {
+      method: 'POST',
+      redirect: 'error',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${state_D.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: state_D.model,
+        messages: [
+          { role: 'system', content: ADVISOR_SYSTEM_PROMPT },
+          ...messages,
+        ],
+        temperature: 0.7,
+        max_tokens: 2000,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error?.message || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    const content = data?.choices?.[0]?.message?.content;
+    if (typeof content !== 'string' || !content.trim()) {
+      throw new Error('服务商未返回有效的文本回复');
+    }
+    return content;
+  } catch (e) {
+    if (controller.signal.aborted) throw new Error('请求超时，请重试');
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function appendDMessage(role, content, isLoading = false) {
