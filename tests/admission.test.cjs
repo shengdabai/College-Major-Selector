@@ -15,7 +15,7 @@ function app(options = {}) {
     if (!elements.has(selector)) {
       const classes = new Set(['hidden']);
       elements.set(selector, {
-        innerHTML: '', value: '', textContent: '', checked: false,
+        innerHTML: '', value: '', textContent: '', checked: false, style: {},
         classList: {
           add: c => classes.add(c), remove: c => classes.delete(c),
           contains: c => classes.has(c),
@@ -28,9 +28,10 @@ function app(options = {}) {
   };
   const alerts = [];
   const context = vm.createContext({
-    window: {}, console: { ...console, error() {} }, URLSearchParams, location: { search: '' },
+    window: {}, console: { ...console, error() {} }, URL, URLSearchParams, location: { search: '' },
     localStorage: options.storage || { getItem: () => null, setItem() {}, removeItem() {} },
-    setTimeout() {},
+    AbortController, setTimeout: options.setTimeout || (() => {}),
+    clearTimeout: options.clearTimeout || (() => {}),
     fetch: options.fetch || (() => new Promise(() => {})),
     alert: text => alerts.push(text),
     document: { querySelector: element, querySelectorAll: () => [],
@@ -450,4 +451,149 @@ test('out-of-range input rank does not generate recommendations', () => {
   a.run('state.C.inputRank = "4001"; computeRecommendation()');
   assert.equal(a.run('state.C.rec'), null);
   assert.match(a.alerts.join(), /范围/);
+});
+
+function advisor(a) {
+  a.run(`initModeD(); state_D.apiKey = 'synthetic-key';
+    var bubbles = [];
+    appendDMessage = (role, content, loading) => bubbles.push({ role, content, loading });
+    removeLoadingBubble = () => {};`);
+}
+
+for (const base of ['http://example.invalid/v1', 'ftp://example.invalid/v1',
+  'https://user:pass@example.invalid/v1', 'https://example.invalid/v1?key=value',
+  'https://example.invalid/v1#fragment', 'https://example.invalid/v1?',
+  'https://example.invalid/v1#', 'not a URL']) {
+  test(`advisor rejects an unsafe or ambiguous endpoint before sending credentials: ${base}`, async () => {
+    const a = app();
+    let calls = 0;
+    a.context.fetch = async () => { calls++; return { ok: true, json: async () => ({}) }; };
+    a.context.base = base;
+    a.run('state_D.apiBase = base');
+    await assert.rejects(a.run('callAdvisorAPI([])'));
+    assert.equal(calls, 0);
+  });
+}
+
+for (const base of ['https://example.invalid/v1/', 'http://localhost:8000/v1',
+  'http://127.0.0.1:8000/v1', 'http://[::1]:8000/v1']) {
+  test(`advisor accepts HTTPS and local development endpoints: ${base}`, async () => {
+    const a = app();
+    let request;
+    a.context.fetch = async (url, options) => {
+      request = { url, options };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'reply' } }] }) };
+    };
+    a.context.base = base;
+    a.run('state_D.apiBase = base');
+    assert.equal(await a.run('callAdvisorAPI([])'), 'reply');
+    assert.equal(request.url, base.replace(/\/$/, '') + '/chat/completions');
+    assert.equal(request.options.redirect, 'error');
+  });
+}
+
+for (const content of [null, {}, [], 42]) {
+  test(`advisor rejects malformed success content: ${JSON.stringify(content)}`, async () => {
+    const a = app();
+    a.context.fetch = async () => ({ ok: true, json: async () => ({ choices: [{ message: { content } }] }) });
+    await assert.rejects(a.run('callAdvisorAPI([])'), /回复/);
+  });
+}
+
+test('advisor opening blocks overlapping sends, saves, and clears until it finishes', async () => {
+  const a = app();
+  advisor(a);
+  const response = deferred();
+  let calls = 0;
+  a.context.fetch = () => { calls++; return response.promise; };
+  const opening = a.run('sendAdvisorOpening()');
+  assert.equal(a.run('state_D.loading'), true);
+  assert.equal(a.element('#D-send-btn').disabled, true);
+  a.element('#D-user-input').value = 'question';
+  a.element('#D-api-base').value = 'https://other.invalid/v1';
+  await a.run('sendUserMessage(); sendAdvisorOpening()');
+  a.element('#D-save-config').onclick();
+  a.element('#D-clear-chat').onclick();
+  assert.equal(a.run('state_D.apiBase'), 'https://api.openai.com/v1');
+  assert.equal(a.element('#D-user-input').value, 'question');
+  assert.equal(calls, 1);
+  response.resolve({ ok: true, json: async () => ({ choices: [{ message: { content: 'opening' } }] }) });
+  await opening;
+  assert.equal(a.run('state_D.messages.length'), 1);
+  assert.equal(a.run('state_D.loading'), false);
+  assert.equal(a.element('#D-send-btn').disabled, false);
+});
+
+test('advisor unlocks after opening failure and allows retry', async () => {
+  const a = app();
+  advisor(a);
+  a.context.fetch = async () => { throw new Error('offline'); };
+  await a.run('sendAdvisorOpening()');
+  assert.equal(a.run('state_D.loading'), false);
+  assert.equal(a.element('#D-save-config').disabled, false);
+  a.context.fetch = async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: 'retry' } }] }) });
+  await a.run('sendAdvisorOpening()');
+  assert.equal(a.run('state_D.messages[0].content'), 'retry');
+});
+
+test('advisor refuses invalid configuration without replacing or persisting the old one', () => {
+  const writes = [];
+  const a = app({ storage: { getItem: () => null, setItem: (...args) => writes.push(args) } });
+  advisor(a);
+  a.element('#D-api-base').value = 'http://example.invalid/v1';
+  a.element('#D-save-config').onclick();
+  assert.equal(a.run('state_D.apiBase'), 'https://api.openai.com/v1');
+  assert.equal(writes.length, 0);
+  assert.match(a.element('#D-status').textContent, /HTTPS/);
+});
+
+test('advisor timeout aborts a stalled request and releases all controls', async () => {
+  let expire, cleared;
+  const a = app({ setTimeout: (callback, ms) => {
+    assert.equal(ms, 60000);
+    expire = callback;
+    return 123;
+  }, clearTimeout: timer => { cleared = timer; } });
+  advisor(a);
+  let signal;
+  a.context.fetch = (url, options) => new Promise((resolve, reject) => {
+    signal = options.signal;
+    signal.addEventListener('abort', () => reject(new Error('aborted')));
+  });
+  const request = a.run('sendAdvisorOpening()');
+  expire();
+  await request;
+  assert.equal(signal.aborted, true);
+  assert.equal(cleared, 123);
+  assert.equal(a.run('state_D.loading'), false);
+  assert.equal(a.element('#D-clear-chat').disabled, false);
+  assert.match(a.run('bubbles.at(-1).content'), /超时/);
+});
+
+test('advisor clears its timeout after success', async () => {
+  let cleared = false;
+  const a = app({ setTimeout: () => 123, clearTimeout: timer => {
+    assert.equal(timer, 123);
+    cleared = true;
+  } });
+  a.context.fetch = async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: 'reply' } }] }) });
+  await a.run('callAdvisorAPI([])');
+  assert.equal(cleared, true);
+});
+
+test('malformed advisor reply preserves earlier history and allows the next send', async () => {
+  const a = app();
+  advisor(a);
+  a.run('state_D.messages = [{ role: "assistant", content: "opening" }]');
+  a.element('#D-user-input').value = 'question';
+  a.context.fetch = async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: {} } }] }) });
+  await a.run('sendUserMessage()');
+  assert.equal(a.run('state_D.messages.length'), 1);
+  assert.equal(a.run('state_D.messages[0].content'), 'opening');
+  assert.match(a.run('bubbles.at(-1).content'), /回复/);
+  assert.equal(a.run('state_D.loading'), false);
+  a.element('#D-user-input').value = 'next question';
+  a.context.fetch = async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: 'answer' } }] }) });
+  await a.run('sendUserMessage()');
+  assert.equal(a.run('state_D.messages.length'), 3);
 });
