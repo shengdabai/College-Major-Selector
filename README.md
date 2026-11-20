@@ -10,7 +10,7 @@
 [![全国通用](https://img.shields.io/badge/覆盖-全国_31_省-c8102e.svg?style=flat-square)](data/province_rules.json)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](#-参与贡献)
 
-### [▶ 在线免登录体验 (GitHub Pages)](https://shengdabai.github.io/college-major-selector/)
+### [▶ 在线免登录体验 (GitHub Pages)](https://shengdabai.github.io/College-Major-Selector/)
 
 > 🔒 录取数据、成绩、位次只在你的浏览器里解析，**不经过任何服务器**。
 
@@ -41,7 +41,7 @@
 
 **方式一：在线体验（零安装，推荐）**
 
-直接打开 → **<https://shengdabai.github.io/college-major-selector/>**
+直接打开 → **<https://shengdabai.github.io/College-Major-Selector/>**
 点首页模式三的「🔮 一键载入示例数据」即可立刻看到冲稳保推荐效果，无需准备任何数据。
 
 **方式二：本地运行**
